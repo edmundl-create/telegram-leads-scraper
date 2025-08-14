@@ -1,0 +1,463 @@
+{
+  "name": "Telegram Scraper",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "459148ec-d3ae-417e-8270-c8e6c5604179",
+      "name": "Every 20 Minutes",
+      "type": "n8n-nodes-base.cron",
+      "position": [
+        528,
+        160
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1NqaJPSN3fiyEqvfPfFoxJQUdVjCr85xrnkxgh_b1YY8",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Search terms",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1NqaJPSN3fiyEqvfPfFoxJQUdVjCr85xrnkxgh_b1YY8/edit#gid=0"
+        },
+        "options": {}
+      },
+      "id": "9a507f2b-8c6f-4cc9-bbc8-3abdb3fd6631",
+      "name": "Read Keywords Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "position": [
+        752,
+        160
+      ],
+      "typeVersion": 4,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "8exhlO78Pvck2n8j",
+          "name": "Google Sheets account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1NqaJPSN3fiyEqvfPfFoxJQUdVjCr85xrnkxgh_b1YY8",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Search terms",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1NqaJPSN3fiyEqvfPfFoxJQUdVjCr85xrnkxgh_b1YY8/edit#gid=0"
+        },
+        "options": {}
+      },
+      "id": "c0c6a5f0-67a4-41af-8d54-6fa82702f5d2",
+      "name": "Update Status to Scraping",
+      "type": "n8n-nodes-base.googleSheets",
+      "position": [
+        1424,
+        160
+      ],
+      "typeVersion": 4,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "8exhlO78Pvck2n8j",
+          "name": "Google Sheets account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Input to this node will be the output of HTTP Request (Get Messages)\n// which contains: [{ message1 }, { message2 }, ...]\n// We also need the original entity data (channel/group title, username etc.) from the HTTP Request (Search Entities) node.\n\nconst originalEntityData = $item(0).json; // Access the original item from the batch (the entity info)\n\nconst keyword = originalEntityData.keyword; // Keyword is passed through by the 'Set' node and then the batch\nconst scrapedMessages = $json; // Messages from the /get_messages call\n\nconst outputItems = [];\nconst timestamp = new Date().toISOString();\n\nconst baseEntityData = {\n    scraped_timestamp: timestamp,\n    search_keyword: keyword,\n    entity_id: originalEntityData.id,\n    entity_title: originalEntityData.title,\n    entity_username: originalEntityData.username,\n    entity_link: originalEntityData.link,\n    entity_type: originalEntityData.type,\n    messages: [] // Will be populated if messages exist\n};\n\nif (scrapedMessages && scrapedMessages.length > 0) {\n    scrapedMessages.forEach(message => {\n        // Ensure message.text is not null/undefined before calling toLowerCase\n        const messageContent = message.text || ''; \n        outputItems.push({\n            json: {\n                ...baseEntityData,\n                message_id: message.id,\n                message_text: messageContent,\n                message_date: message.date,\n                sender_id: message.sender_id,\n                sender_name: message.sender_name,\n                is_channel_post: message.is_channel_post,\n                views: message.views,\n                replies: message.replies,\n                message_link: message.link,\n                contains_keyword: messageContent.toLowerCase().includes(keyword.toLowerCase())\n            }\n        });\n    });\n} else {\n    // If no messages found for this entity, still output the entity data\n    outputItems.push({\n        json: {\n            ...baseEntityData,\n            message_id: null,\n            message_text: null,\n            message_date: null,\n            sender_id: null,\n            sender_name: null,\n            is_channel_post: null,\n            views: null,\n            replies: null,\n            message_link: null,\n            contains_keyword: false\n        }\n    });\n}\n\nreturn outputItems;"
+      },
+      "id": "66569384-2cbb-43f6-baed-1b95959bd11a",
+      "name": "Extract Telegram Data",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        2544,
+        256
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "has_relevant_content",
+              "operator": {
+                "type": "boolean",
+                "operation": "isTrue"
+              },
+              "leftValue": "={{ $json.contains_keyword }}",
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4249da2f-9c3d-49bf-a0f6-251be29d133e",
+      "name": "Filter Relevant Content",
+      "type": "n8n-nodes-base.filter",
+      "position": [
+        2768,
+        256
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "jsCode": "// Transform data for Google Sheets output to match the specified \"Leads Output\" format\nconst data = $input.first().json;\n\nconst rows = [];\n\n// Helper to get a timestamp for display\nconst getFormattedTimestamp = (date) => {\n  return date ? new Date(date).toLocaleString() : '';\n};\n\nrows.push({\n    \"Search Keyword\": data.search_keyword,\n    \"Entity Type\": data.entity_type,\n    \"Entity Name\": data.entity_title,\n    \"Entity Username\": data.entity_username,\n    \"Entity Link\": data.entity_link,\n    \"Message ID\": data.message_id,\n    \"Message Content\": data.message_text,\n    \"Message Date\": getFormattedTimestamp(data.message_date),\n    \"Sender Name\": data.sender_name,\n    \"Sender ID\": data.sender_id,\n    \"Is Channel Post\": data.is_channel_post ? 'Yes' : 'No',\n    \"Views\": data.views,\n    \"Replies\": data.replies,\n    \"Message Link\": data.message_link,\n    \"Contains Keyword\": data.contains_keyword ? 'Yes' : 'No',\n    \"Scraped Timestamp\": getFormattedTimestamp(data.scraped_timestamp)\n});\n\nreturn rows.map(row => ({ json: row }));"
+      },
+      "id": "5eba86b6-c7f3-4894-ad64-5b810304d8fa",
+      "name": "Format for Google Sheets",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        2992,
+        256
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "documentId": "1NqaJPSN3fiyEqvfPfFoxJQUdVjCr85xrnkxgh_b1YY8",
+        "sheetName": "Leads Output",
+        "options": {}
+      },
+      "id": "990beb78-0b21-4eb2-b0e5-0fb58c127a33",
+      "name": "Save Leads to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "position": [
+        3216,
+        256
+      ],
+      "typeVersion": 4,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "8exhlO78Pvck2n8j",
+          "name": "Google Sheets account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": "1NqaJPSN3fiyEqvfPfFoxJQUdVjCr85xrnkxgh_b1YY8",
+        "sheetName": "Search terms",
+        "options": {}
+      },
+      "id": "ed37a511-a252-4627-9e55-28f63749bc5f",
+      "name": "Update Status Complete",
+      "type": "n8n-nodes-base.googleSheets",
+      "position": [
+        3440,
+        256
+      ],
+      "typeVersion": 4,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "8exhlO78Pvck2n8j",
+          "name": "Google Sheets account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "820de74d-dd43-4541-be5f-4eca32bb34c7",
+              "name": "debugStatus",
+              "value": "={{ $json.Status.toLowerCase() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        976,
+        160
+      ],
+      "id": "16cf1714-675b-49af-9aee-bd6534062ca0",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "jsCode": "const keptItems = []; // Array to hold items that pass the filter\n\nfor (const item of items) {\n  // Get the Status value, defaulting to an empty string if it's null/undefined\n  const statusValue = item.json.Status || \"\";\n  \n  // Convert to lowercase, just like in your original filter\n  const lowerCaseStatus = statusValue.toLowerCase();\n  \n  // Define the target string\n  const targetValue = \"scrapped\"; \n  \n  // Evaluate the condition: is the lowercased status NOT EQUAL to \"scrapped\"?\n  // If this evaluates to true, the item passes the filter.\n  if (lowerCaseStatus !== targetValue) {\n    keptItems.push(item); // Add the item to our 'kept' list\n  }\n  // Items that don't pass the condition are simply not added to keptItems\n}\n\nreturn keptItems; // The node will only output the items that were 'kept'"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        160
+      ],
+      "id": "4defdfeb-0fe2-44b9-8889-8520f961f9a8",
+      "name": "Code (Filter Scrapped)"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "3677868f-724a-44fb-88e9-65ecba7f8bc1",
+              "name": "keyword",
+              "value": "={{ $json.Terms }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1648,
+        160
+      ],
+      "id": "4036d240-e669-4fb1-a0bd-14fb77da7c6a",
+      "name": "Prepare Keyword for HTTP Request"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TELEGRAM_API_BASE_URL + '/search_entities' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"keyword\": $json.keyword,\n    \"limit\": 5\n  }\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1872,
+        160
+      ],
+      "id": "4fad7f97-aab6-469e-b01a-95723b4ee153",
+      "name": "HTTP Search Telegram Entities"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TELEGRAM_API_BASE_URL + '/get_messages' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"entity_id\": $json.id, // Use the entity ID from the previous search result\n    \"limit\": 10 // Get up to 10 messages per entity\n  }\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2320,
+        256
+      ],
+      "id": "52082e4b-af53-4dd7-999b-bd7be6ec8a8f",
+      "name": "HTTP Get Messages"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        2096,
+        160
+      ],
+      "id": "056b81ea-975b-409e-b3e8-dfebfb56ef93",
+      "name": "Loop Over Entities"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 20 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Read Keywords Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Keywords Sheet": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Status to Scraping": {
+      "main": [
+        [
+          {
+            "node": "Prepare Keyword for HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Telegram Data": {
+      "main": [
+        [
+          {
+            "node": "Filter Relevant Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Relevant Content": {
+      "main": [
+        [
+          {
+            "node": "Format for Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format for Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Save Leads to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Leads to Sheet": {
+      "main": [
+        [
+          {
+            "node": "Update Status Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields": {
+      "main": [
+        [
+          {
+            "node": "Code (Filter Scrapped)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code (Filter Scrapped)": {
+      "main": [
+        [
+          {
+            "node": "Update Status to Scraping",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Keyword for HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "HTTP Search Telegram Entities",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Search Telegram Entities": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Entities",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Get Messages": {
+      "main": [
+        [
+          {
+            "node": "Extract Telegram Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Entities": {
+      "main": [
+        [
+          {
+            "node": "HTTP Get Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "7399423d-3f74-49ff-9fed-e76722d701ec",
+  "meta": {
+    "instanceId": "b404dac09ac27080d0e516b799ce0c7a4f944e6e60c119752e889178b0165331"
+  },
+  "id": "slKiNDE4JBw7UnZj",
+  "tags": []
+}
