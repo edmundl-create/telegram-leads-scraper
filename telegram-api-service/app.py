@@ -1,59 +1,36 @@
 import os
-import asyncio # Keep asyncio for async operations
+import asyncio
 from flask import Flask, request, jsonify
 from telethon import TelegramClient, events
 from telethon.tl.types import Channel, Chat, User
 from dotenv import load_dotenv
 
-# Load environment variables from .env file (for local development)
-# On Render, these will be injected directly as environment variables
 load_dotenv()
 
-# --- Configuration ---
-# Telegram API credentials from environment variables
-# IMPORTANT: These must be set as environment variables on Render
-# and in a .env file locally for testing.
 API_ID = os.getenv('TELEGRAM_API_ID')
 API_HASH = os.getenv('TELEGRAM_API_HASH')
-PHONE_NUMBER = os.getenv('TELEGRAM_PHONE_NUMBER') # Your phone number with country code, e.g., +12345678900
+PHONE_NUMBER = os.getenv('TELEGRAM_PHONE_NUMBER')
 
-# Basic validation for credentials
 if not all([API_ID, API_HASH, PHONE_NUMBER]):
     raise ValueError("Missing one or more Telegram API credentials. Ensure TELEGRAM_API_ID, TELEGRAM_API_HASH, and TELEGRAM_PHONE_NUMBER are set.")
 
 app = Flask(__name__)
-# 'anon_session' is the session file name. Telethon will create 'anon_session.session'
-# Make sure to generate this file locally and commit it to your GitHub repo for Render.
 client = TelegramClient('anon_session', int(API_ID), API_HASH)
 
-# --- Telegram Client Connection and Authentication Utility ---
 async def ensure_telethon_connection():
-    """
-    Ensures the Telethon client is connected and authorized.
-    This function should be called at the beginning of any route that needs Telegram access.
-    """
     if not client.is_connected():
         print("Telethon client not connected, attempting to connect...")
         await client.connect()
         print("Telethon client reconnected.")
 
     if not await client.is_user_authorized():
-        # This block should ideally *not* be hit on Render if 'anon_session.session'
-        # was generated locally and committed to the repo, as it would
-        # require interactive input for the login code.
         print(f"Telethon client not authorized. Attempting to start session for {PHONE_NUMBER}...")
         try:
-            # If session file exists, this loads it. If not, it tries to authenticate interactively.
             await client.start(phone=PHONE_NUMBER)
             print("Telethon client authorized successfully.")
         except Exception as e:
             print(f"Error during Telethon client authorization: {e}")
-            # It's critical to ensure the session is pre-generated for Render.
-            # If this fails, subsequent API calls will also fail.
             raise
-
-
-# --- API Endpoints ---
 
 @app.route('/')
 def home():
@@ -61,7 +38,7 @@ def home():
 
 @app.route('/search_entities', methods=['POST'])
 async def search_entities():
-    await ensure_telethon_connection() # Ensure connection before making the call
+    await ensure_telethon_connection()
     data = request.json
     keyword = data.get('keyword')
     limit = int(data.get('limit', 5))
@@ -99,7 +76,7 @@ async def search_entities():
                 })
                 if len(results) >= limit:
                     break
-
+        
         if (keyword.startswith('@') or keyword.isdigit()) and not any(r['username'] == keyword or str(r['id']) == keyword for r in results):
             try:
                 resolved_entity = await client.get_entity(keyword)
@@ -114,7 +91,7 @@ async def search_entities():
                     entity_type = "channel"
                 else:
                     entity_type = "unknown"
-
+                
                 results.append({
                     "id": resolved_entity.id,
                     "title": getattr(resolved_entity, 'title', resolved_entity.first_name),
@@ -134,7 +111,7 @@ async def search_entities():
 
 @app.route('/get_messages', methods=['POST'])
 async def get_messages():
-    await ensure_telethon_connection() # Ensure connection before making the call
+    await ensure_telethon_connection()
     data = request.json
     entity_identifier = data.get('entity_id') or data.get('entity_username')
     limit = int(data.get('limit', 10))
@@ -185,7 +162,7 @@ async def get_messages():
 
 @app.route('/get_members', methods=['POST'])
 async def get_members():
-    await ensure_telethon_connection() # Ensure connection before making the call
+    await ensure_telethon_connection()
     data = request.json
     entity_identifier = data.get('entity_id') or data.get('entity_username')
     limit = int(data.get('limit', 10))
@@ -223,9 +200,8 @@ async def get_members():
         return jsonify({"error": str(e)}), 500
 
     return jsonify(members_data)
-
 # For running locally (for initial session generation or debugging):
-# This part is commented out for Render deployment as Hypercorn manages the server.
+# This part needs to be uncommented for local execution.
 # if __name__ == '__main__':
 #     # Ensure the event loop is created for async Flask and run initial connection
 #     try:
@@ -235,5 +211,11 @@ async def get_members():
 #         asyncio.set_event_loop(loop)
 #
 #     # Run the ensure_telethon_connection before starting the app
+#     # This is where the Telegram authentication prompt will appear
 #     loop.run_until_complete(ensure_telethon_connection())
-#     app.run(debug=True, port=8080)
+#
+#     # You can keep this line commented out for session generation,
+#     # or uncomment if you want to test the local Flask server after session.
+#     # If uncommented, you can access http://localhost:8080
+#     # app.run(debug=True, port=8080, host='0.0.0.0')
+#     print("Telethon session generated. Script will now exit unless app.run is uncommented.")

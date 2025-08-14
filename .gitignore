@@ -1,0 +1,29 @@
+# Ignore Telethon session files
+*.session*
+
+# Ignore local environment variables
+.env
+
+# Python specific ignores
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.venv/
+*.pyc
+*.pyo
+*.pyd
+*.so
+.Python/
+build/
+dist/
+develop-eggs/
+.eggs/
+*.egg-info/
+.coverage
+.coverage.*
+.env
+.idea/
+.vscode/
+
+# Render-specific
+.render/
