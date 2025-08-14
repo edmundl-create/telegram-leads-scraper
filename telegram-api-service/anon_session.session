@@ -1,0 +1,4 @@
+git add telegram-api-service/app.py
+git add telegram-api-service/anon_session.session # Only if you generated it locally and haven't added/committed it yet
+git commit -m "Fix Flask 3.x compatibility by removing before_first_request and adding connection helper"
+git push origin main # Or master, depending on your branch name
