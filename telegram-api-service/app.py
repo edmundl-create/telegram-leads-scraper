@@ -24,30 +24,37 @@ _startup_task = None # To hold the reference to the background task
 
 async def _connect_telethon_on_startup_task():
     """Internal task to handle the actual Telethon connection and authorization."""
-    print("LOG: _connect_telethon_on_startup_task initiated.")
+    print("LOG: _connect_telethon_on_startup_task initiated.", flush=True)
     try:
+        # Give a tiny moment for the world to settle, especially on Render free tier
+        await asyncio.sleep(1) 
+        print("LOG: After initial sleep. Checking authorization.", flush=True)
+
         # Check if client is already authorized (session file exists and is valid)
         if not await client.is_user_authorized():
-            print(f"LOG: Telethon client not authorized, attempting session start for {PHONE_NUMBER}...")
+            print(f"LOG: Telethon client not authorized, attempting session start for {PHONE_NUMBER}...", flush=True)
             # This is where the session file is used or auth flow is initiated
             await client.start(phone=PHONE_NUMBER)
-            print("LOG: Telethon client authorized successfully.")
+            print("LOG: Telethon client authorized successfully.", flush=True)
         else:
-            print("LOG: Telethon client already authorized. Ensuring connection is active...")
+            print("LOG: Telethon client already authorized. Ensuring connection is active...", flush=True)
             # If authorized, ensure it's connected (e.g., after Render sleep)
             if not client.is_connected():
-                print("LOG: Client detected as disconnected, attempting to reconnect...")
+                print("LOG: Client detected as disconnected, attempting to reconnect...", flush=True)
                 await client.connect()
-                print("LOG: Client reconnected.")
+                print("LOG: Client reconnected.", flush=True)
             else:
-                print("LOG: Client already connected.")
+                print("LOG: Client already connected.", flush=True)
 
         _telethon_client_startup_future.set_result(client)
-        print("LOG: _telethon_client_startup_future set to success.")
+        print("LOG: _telethon_client_startup_future set to success.", flush=True)
     except Exception as e:
-        print(f"CRITICAL ERROR: Failed to connect Telethon client: {e}")
+        print(f"CRITICAL ERROR: Failed to connect Telethon client: {e}", flush=True)
+        # print the full traceback for more info
+        import traceback
+        traceback.print_exc(file=sys.stdout) # Print to stdout so Render captures it
         _telethon_client_startup_future.set_exception(e)
-        print("LOG: _telethon_client_startup_future set to exception.")
+        print("LOG: _telethon_client_startup_future set to exception.", flush=True)
         # Re-raise to ensure the task fails and can be seen if awaited
         raise
 
@@ -58,65 +65,63 @@ async def ensure_telethon_client_ready():
     """
     global _startup_task
     
-    print(f"LOG: ensure_telethon_client_ready called. Future done: {_telethon_client_startup_future.done()}")
+    print(f"LOG: ensure_telethon_client_ready called. Future done: {_telethon_client_startup_future.done()}", flush=True)
 
     if not _telethon_client_startup_future.done():
         if _startup_task is None:
-            print("LOG: _startup_task is None, creating new background task.")
-            # Only create the task once. The first request that hits this will initiate it.
-            # This task runs on Hypercorn's event loop.
+            print("LOG: _startup_task is None, creating new background task.", flush=True)
             _startup_task = asyncio.create_task(_connect_telethon_on_startup_task())
-            print("LOG: Telethon client startup scheduled as a background task.")
+            print("LOG: Telethon client startup scheduled as a background task.", flush=True)
         else:
-            print("LOG: _startup_task already exists, awaiting its completion.")
+            print("LOG: _startup_task already exists, awaiting its completion.", flush=True)
         
-        # Wait for the startup task to complete.
         try:
             # We wait for the task itself, which will either complete or raise its exception
             await asyncio.wait_for(_startup_task, timeout=120) # Increased timeout to 120 seconds
-            print("LOG: _startup_task completed successfully (or was already done).")
+            print("LOG: _startup_task completed successfully (or was already done).", flush=True)
         except asyncio.TimeoutError:
-            print("CRITICAL ERROR: Telethon client startup task timed out waiting.")
+            print("CRITICAL ERROR: Telethon client startup task timed out waiting.", flush=True)
             raise RuntimeError("Telegram client startup timed out.")
         except Exception as e:
             # Catch exceptions from the task itself, re-raise if it's the actual startup exception
             if _telethon_client_startup_future.exception():
+                print("LOG: _telethon_client_startup_future indicates an exception from task, re-raising.", flush=True)
                 raise _telethon_client_startup_future.exception()
             else:
+                print(f"LOG: Unexpected error during client startup task await: {e}", flush=True)
                 raise RuntimeError(f"Unexpected error during client startup task await: {e}")
 
-    # After waiting, check if the future holds an exception from the startup attempt
     if _telethon_client_startup_future.exception():
-        print("LOG: _telethon_client_startup_future indicates an exception. Re-raising it.")
+        print("LOG: _telethon_client_startup_future indicates an exception. Re-raising it.", flush=True)
         raise _telethon_client_startup_future.exception()
     
-    print("LOG: Telethon client confirmed ready.")
+    print("LOG: Telethon client confirmed ready.", flush=True)
 
 
 # --- API Endpoints ---
 @app.route('/')
 async def home():
-    print("LOG: Received request to /")
+    print("LOG: Received request to /", flush=True)
     try:
         await ensure_telethon_client_ready()
         return "Telegram Scraper API is running and Telethon client is connected!"
     except Exception as e:
-        print(f"LOG: Error at / endpoint: {e}")
+        print(f"LOG: Error at / endpoint: {e}", flush=True)
         return f"Telegram Scraper API is running, but Telethon client is not connected: {e}", 503
 
 @app.route('/search_entities', methods=['POST'])
 async def search_entities():
-    print("LOG: Received request to /search_entities")
+    print("LOG: Received request to /search_entities", flush=True)
     try:
         await ensure_telethon_client_ready()
     except Exception as e:
-        print(f"LOG: Error in search_entities during client readiness check: {e}")
+        print(f"LOG: Error in search_entities during client readiness check: {e}", flush=True)
         return jsonify({"error": f"Telegram client not ready: {e}"}), 503
 
     data = request.json
     keyword = data.get('keyword')
     limit = int(data.get('limit', 5))
-    print(f"LOG: search_entities - Keyword: {keyword}, Limit: {limit}")
+    print(f"LOG: search_entities - Keyword: {keyword}, Limit: {limit}", flush=True)
 
     if not keyword:
         return jsonify({"error": "Keyword is required"}), 400
@@ -175,10 +180,10 @@ async def search_entities():
                     "is_public": getattr(resolved_entity, 'broadcast', False) or getattr(resolved_entity, 'megagroup', False) or getattr(resolved_entity, 'gigagroup', False)
                 })
             except Exception as e:
-                print(f"LOG: Could not resolve entity '{keyword}' directly: {e}")
+                print(f"LOG: Could not resolve entity '{keyword}' directly: {e}", flush=True)
 
     except Exception as e:
-        print(f"ERROR: Error in search_entities: {e}")
+        print(f"ERROR: Error in search_entities: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
 
     return jsonify(results)
@@ -186,18 +191,18 @@ async def search_entities():
 
 @app.route('/get_messages', methods=['POST'])
 async def get_messages():
-    print("LOG: Received request to /get_messages")
+    print("LOG: Received request to /get_messages", flush=True)
     try:
         await ensure_telethon_client_ready()
     except Exception as e:
-        print(f"LOG: Error in get_messages during client readiness check: {e}")
+        print(f"LOG: Error in get_messages during client readiness check: {e}", flush=True)
         return jsonify({"error": f"Telegram client not ready: {e}"}), 503
 
     data = request.json
     entity_identifier = data.get('entity_id') or data.get('entity_username')
     limit = int(data.get('limit', 10))
     offset_id = int(data.get('offset_id', 0))
-    print(f"LOG: get_messages - Entity: {entity_identifier}, Limit: {limit}, Offset: {offset_id}")
+    print(f"LOG: get_messages - Entity: {entity_identifier}, Limit: {limit}, Offset: {offset_id}", flush=True)
 
     if not entity_identifier:
         return jsonify({"error": "Either entity_id or entity_username is required"}), 400
@@ -236,7 +241,7 @@ async def get_messages():
                 "link": message.url,
             })
     except Exception as e:
-        print(f"ERROR: Error in get_messages: {e}")
+        print(f"ERROR: Error in get_messages: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
 
     return jsonify(messages_data)
@@ -244,17 +249,17 @@ async def get_messages():
 
 @app.route('/get_members', methods=['POST'])
 async def get_members():
-    print("LOG: Received request to /get_members")
+    print("LOG: Received request to /get_members", flush=True)
     try:
         await ensure_telethon_client_ready()
     except Exception as e:
-        print(f"LOG: Error in get_members during client readiness check: {e}")
+        print(f"LOG: Error in get_members during client readiness check: {e}", flush=True)
         return jsonify({"error": f"Telegram client not ready: {e}"}), 503
 
     data = request.json
     entity_identifier = data.get('entity_id') or data.get('entity_username')
     limit = int(data.get('limit', 10))
-    print(f"LOG: get_members - Entity: {entity_identifier}, Limit: {limit}")
+    print(f"LOG: get_members - Entity: {entity_identifier}, Limit: {limit}", flush=True)
 
     if not entity_identifier:
         return jsonify({"error": "Either entity_id or entity_username is required"}), 400
@@ -285,7 +290,7 @@ async def get_members():
             return jsonify({"error": "Cannot fetch members from this entity type (must be a group/channel you are a member of with permission) or it's a private chat"}), 400
 
     except Exception as e:
-        print(f"ERROR: Error in get_members: {e}")
+        print(f"ERROR: Error in get_members: {e}", flush=True)
         return jsonify({"error": str(e)}), 500
 
     return jsonify(members_data)
