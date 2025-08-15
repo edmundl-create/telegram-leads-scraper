@@ -1,4 +1,4 @@
-Flask
+Flask[async]
 telethon
 python-dotenv
 hypercorn
