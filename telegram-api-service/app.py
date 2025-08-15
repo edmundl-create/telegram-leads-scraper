@@ -13,7 +13,6 @@ load_dotenv()
 # --- Configuration ---
 API_ID = os.getenv('TELEGRAM_API_ID')
 API_HASH = os.getenv('TELEGRAM_API_HASH')
-# PHONE_NUMBER is no longer directly used in app.py for authentication
 TELETHON_STRING_SESSION = os.getenv('TELETHON_STRING_SESSION') # New env var
 
 # Basic validation
@@ -21,86 +20,99 @@ if not all([API_ID, API_HASH, TELETHON_STRING_SESSION]):
     raise ValueError("Missing one or more Telegram API credentials. Ensure TELEGRAM_API_ID, TELEGRAM_API_HASH, and TELETHON_STRING_SESSION are set.")
 
 app = Flask(__name__)
-# Initialize client with StringSession
-client = TelegramClient(StringSession(TELETHON_STRING_SESSION), int(API_ID), API_HASH)
 
-# --- Telethon Client Connection Management ---
-_telethon_client_startup_future = asyncio.Future()
-_startup_task = None # To hold the reference to the background task
+# Global client and connection management variables
+# client will be initialized/re-initialized as needed
+client = None # Start with client as None
+_telethon_client_startup_future = asyncio.Future() # Tracks if ANY client startup has succeeded
+_startup_task = None # To hold the reference to the initial background task
 
-async def _connect_telethon_on_startup_task():
+async def initialize_and_connect_telethon_client():
     """
-    Internal task to handle the actual Telethon connection.
-    This version relies on client.start() to handle both connection and authorization.
+    Initializes a new TelethonClient and attempts to connect it.
+    This function creates a *new* client instance each time it's called.
     """
-    print("LOG: _connect_telethon_on_startup_task initiated.", flush=True)
+    global client
+    print("LOG: initialize_and_connect_telethon_client: Creating new TelethonClient instance.", flush=True)
     try:
-        await asyncio.sleep(1) # Small delay for environment to settle
-        print("LOG: After initial sleep. Attempting client.start() with StringSession...", flush=True)
-
-        # With StringSession provided at initialization, client.start() will connect
-        # and ensure authorization without needing phone number or code input.
-        await client.start() 
+        # Create a brand new client instance for this connection attempt
+        client = TelegramClient(StringSession(TELETHON_STRING_SESSION), int(API_ID), API_HASH)
         
-        print("LOG: Telethon client.start() completed.", flush=True)
-
-        # Final check if user is authorized (should be true if StringSession is valid)
-        if await client.is_user_authorized(): 
-            print("LOG: Telethon client authorized and connected successfully for application lifetime.", flush=True)
+        print("LOG: initialize_and_connect_telethon_client: Attempting client.start() with StringSession...", flush=True)
+        await client.start() # This handles connection and authorization with StringSession
+        print("LOG: initialize_and_connect_telethon_client: client.start() completed.", flush=True)
+        
+        if await client.is_user_authorized():
+            print("LOG: initialize_and_connect_telethon_client: Telethon client authorized and connected successfully.", flush=True)
+            return True # Success
         else:
-            # This case should ideally not be hit with a valid StringSession and successful client.start()
-            print("CRITICAL ERROR: Telethon client connected but not authorized after client.start() with StringSession.", flush=True)
-            raise RuntimeError("Client connected but not authorized after StringSession startup.")
-
-        _telethon_client_startup_future.set_result(client)
-        print("LOG: _telethon_client_startup_future set to success.", flush=True)
+            print("CRITICAL ERROR: initialize_and_connect_telethon_client: Telethon client connected but not authorized unexpectedly.", flush=True)
+            return False # Failed authorization
+            
     except Exception as e:
-        print(f"CRITICAL ERROR: Failed to connect Telethon client using StringSession: {e}", flush=True)
-        print("CRITICAL ERROR: Printing full traceback:", flush=True)
-        traceback.print_exc(file=sys.stdout) # Print to stdout so Render captures it
-        sys.stdout.flush() # Explicitly flush stdout buffer
-        _telethon_client_startup_future.set_exception(e)
-        print("LOG: _telethon_client_startup_future set to exception.", flush=True)
-        raise # Re-raise to ensure the task fails and can be seen if awaited
+        print(f"CRITICAL ERROR: initialize_and_connect_telethon_client: Failed to connect Telethon client: {e}", flush=True)
+        print("CRITICAL ERROR: Printing full traceback for connection failure:", flush=True)
+        traceback.print_exc(file=sys.stdout)
+        sys.stdout.flush()
+        return False # Failed to connect
+
 
 async def ensure_telethon_client_ready():
     """
-    Ensures the Telethon client startup task is initiated and awaited.
-    This function should be called at the beginning of each async API route.
+    Ensures the Telethon client is connected and ready.
+    This function is called by each API endpoint. It now handles:
+    1. Initial global client setup.
+    2. Re-connecting/re-initializing the client if it becomes disconnected.
     """
-    global _startup_task
-    
-    print(f"LOG: ensure_telethon_client_ready called. Future done: {_telethon_client_startup_future.done()}", flush=True)
+    global client, _startup_task
 
-    if not _telethon_client_startup_future.done():
-        if _startup_task is None:
-            print("LOG: _startup_task is None, creating new background task.", flush=True)
-            _startup_task = asyncio.create_task(_connect_telethon_on_startup_task())
-            print("LOG: Telethon client startup scheduled as a background task.", flush=True)
-        else:
-            print("LOG: _startup_task already exists, awaiting its completion.", flush=True)
+    # Step 1: Handle initial client setup if it hasn't happened yet
+    if client is None:
+        print("LOG: ensure_telethon_client_ready: Client is None. Initiating first-time connection.", flush=True)
+        _startup_task = asyncio.create_task(initialize_and_connect_telethon_client())
+        _telethon_client_startup_future.set_result(None) # Mark future as started, actual result set by task
+        print("LOG: ensure_telethon_client_ready: Initial client connection scheduled as background task.", flush=True)
         
         try:
-            await asyncio.wait_for(_startup_task, timeout=120) # Increased timeout to 120 seconds
-            print("LOG: _startup_task completed successfully (or was already done).", flush=True)
+            # Wait for the initial connection task to complete.
+            success = await asyncio.wait_for(_startup_task, timeout=120) 
+            if not success:
+                print("CRITICAL ERROR: ensure_telethon_client_ready: Initial client connection failed (task returned False).", flush=True)
+                raise RuntimeError("Initial Telegram client connection failed.")
+            print("LOG: ensure_telethon_client_ready: Initial client connection task completed successfully.", flush=True)
         except asyncio.TimeoutError:
-            print("CRITICAL ERROR: Telethon client startup task timed out waiting.", flush=True)
-            raise RuntimeError("Telegram client startup timed out.")
+            print("CRITICAL ERROR: ensure_telethon_client_ready: Initial Telegram client connection timed out.", flush=True)
+            raise RuntimeError("Initial Telegram client connection timed out.")
         except Exception as e:
-            if _telethon_client_startup_future.exception():
-                print("LOG: _telethon_client_startup_future indicates an exception from task, re-raising.", flush=True)
-                raise _telethon_client_startup_future.exception()
-            else:
-                print(f"LOG: Unexpected error during client startup task await: {e}", flush=True)
-                raise RuntimeError(f"Unexpected error during client startup task await: {e}")
+            print(f"CRITICAL ERROR: ensure_telethon_client_ready: Unexpected error during initial client connection: {e}", flush=True)
+            raise RuntimeError(f"Unexpected error during initial client connection: {e}")
 
-    if _telethon_client_startup_future.exception():
-        print("LOG: _telethon_client_startup_future indicates an exception. Re-raising it.", flush=True)
-        raise _telethon_client_startup_future.exception()
-    
-    print("LOG: Telethon client confirmed ready.", flush=True)
+    # Step 2: For subsequent requests (or if initial client setup needs re-checking):
+    # Check if the client is connected and authorized. If not, re-initialize and connect.
+    try:
+        # Check if the client is not connected OR if it exists but is not authorized
+        if not (client and client.is_connected() and await client.is_user_authorized()):
+            print("LOG: ensure_telethon_client_ready: Client either not connected or not authorized. Attempting re-initialization and reconnection...", flush=True)
+            success = await initialize_and_connect_telethon_client() # Recreate and reconnect
+            if not success:
+                print("CRITICAL ERROR: ensure_telethon_client_ready: Re-connection/re-initialization failed.", flush=True)
+                raise RuntimeError("Telegram client failed to reconnect/re-initialize.")
+            print("LOG: ensure_telethon_client_ready: Client re-initialized and reconnected successfully.", flush=True)
+        
+    except Exception as e:
+        print(f"CRITICAL ERROR: ensure_telethon_client_ready: Failed to ensure client is connected/authorized for request: {e}", flush=True)
+        traceback.print_exc(file=sys.stdout) # Print full traceback
+        sys.stdout.flush()
+        # Ensure the future is marked as failed so subsequent calls fail fast
+        if not _telethon_client_startup_future.done():
+            _telethon_client_startup_future.set_exception(e)
+        raise RuntimeError(f"Telegram client failed to reconnect or verify authorization: {e}")
 
-# --- API Endpoints (These remain the same as previous version) ---
+    # If we reached here, the client should be ready
+    print("LOG: Telethon client confirmed ready for request.", flush=True)
+
+
+# --- API Endpoints ---
 @app.route('/')
 async def home():
     print("LOG: Received request to /", flush=True)
