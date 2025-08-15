@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# --- Configuration ---
 API_ID = os.getenv('TELEGRAM_API_ID')
 API_HASH = os.getenv('TELEGRAM_API_HASH')
 PHONE_NUMBER = os.getenv('TELEGRAM_PHONE_NUMBER')
@@ -17,62 +18,71 @@ if not all([API_ID, API_HASH, PHONE_NUMBER]):
 app = Flask(__name__)
 client = TelegramClient('anon_session', int(API_ID), API_HASH)
 
-# --- GLOBAL FLAG FOR CONNECTION STATUS ---
-TELETHON_CLIENT_CONNECTED = False
+# --- DIRECT TELETHON CLIENT INITIALIZATION AT MODULE LOAD ---
+# This approach leverages the fact that Hypercorn will manage an event loop
+# when the module is first loaded, allowing Telethon to connect once.
+# The 'anon_session.session' file MUST be present for this to work without interaction.
+try:
+    # Run the client connection in a separate thread's event loop
+    # or ensure it's awaited if Hypercorn provides a context.
+    # For Hypercorn, this generally works because it establishes the loop on startup.
+    loop = asyncio.get_event_loop() # Get Hypercorn's event loop
+except RuntimeError:
+    # If no loop is running (e.g., in a non-Hypercorn test environment, though not for Render)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
-# --- Telegram Client Connection and Authentication Utility ---
-# This function will now be called only ONCE during application startup
-async def startup_telethon_client():
-    global TELETHON_CLIENT_CONNECTED
-    print("Attempting to connect Telethon client during application startup...")
+# Create a future to hold the connection status/client object
+connection_future = asyncio.Future(loop=loop)
+
+async def _connect_telethon_on_startup():
+    print("Attempting to connect Telethon client directly on module load...")
     try:
-        # We only call client.start() once here. Telethon manages reconnections internally.
+        # Client.start() handles connection and authorization/session loading
         if not await client.is_user_authorized():
-            print(f"Telethon client not authorized, attempting session start for {PHONE_NUMBER}...")
-            await client.start(phone=PHONE_NUMBER) # This loads session or authenticates
-            print("Telethon client authorized successfully during startup.")
+            print("Telethon client not authorized, attempting session start (should use session file)...")
+            await client.start(phone=PHONE_NUMBER)
+            print("Telethon client authorized successfully.")
         else:
             print("Telethon client already authorized. Ensuring connection is active...")
-            # Ensure client is connected if not already (e.g. after sleep)
             if not client.is_connected():
                 await client.connect()
-            
         print("Telethon client connection established for application lifetime.")
-        TELETHON_CLIENT_CONNECTED = True
+        connection_future.set_result(client) # Indicate success
     except Exception as e:
-        print(f"CRITICAL ERROR: Failed to connect Telethon client during startup: {e}")
-        # If client cannot connect at startup, future requests will fail.
-        # Consider more robust error handling or shutdown.
-        TELETHON_CLIENT_CONNECTED = False # Ensure flag is false on failure
-        raise # Re-raise to fail early if connection critical
+        print(f"CRITICAL ERROR: Failed to connect Telethon client on startup: {e}")
+        connection_future.set_exception(e) # Indicate failure
+        raise # Re-raise to crash early if connection is critical
 
-# --- Application Startup Hook for Hypercorn ---
-# Hypercorn has its own startup/shutdown hooks
-# We'll leverage a simple async task that runs at app start
-# Flask has no simple @app.before_first_request for async functions
-# So we run it as a background task.
-@app.before_serving
-async def setup_telethon_client_hook():
-    # This hook runs AFTER the server is ready, but BEFORE it serves requests.
-    # It might run in Hypercorn's event loop, so we run our client.start() as a task.
-    # We should only attempt this if the client isn't already connected globally.
-    if not TELETHON_CLIENT_CONNECTED:
-        asyncio.create_task(startup_telethon_client())
-        print("Telethon client startup task initiated.")
+# Schedule the connection task to run on the event loop
+# This makes it run once when the module loads, managed by Hypercorn's event loop.
+asyncio.create_task(_connect_telethon_on_startup())
 
 # --- API Endpoints ---
 
 @app.route('/')
 def home():
-    if TELETHON_CLIENT_CONNECTED:
+    # Check if the connection attempt completed successfully
+    if connection_future.done() and not connection_future.exception():
         return "Telegram Scraper API is running and Telethon client is connected!"
     else:
-        return "Telegram Scraper API is running, but Telethon client is not connected.", 503 # Service Unavailable
+        # If connection failed at startup, report 503
+        return "Telegram Scraper API is running, but Telethon client failed to connect at startup.", 503
 
 @app.route('/search_entities', methods=['POST'])
 async def search_entities():
-    if not TELETHON_CLIENT_CONNECTED:
-        return jsonify({"error": "Telegram client not initialized or connected."}), 503
+    # Wait for the client to be connected on the first request if it hasn't finished yet
+    # This acts as a safeguard during potential race conditions at startup
+    if not connection_future.done():
+        try:
+            await asyncio.wait_for(connection_future, timeout=30) # Wait up to 30 seconds for connection
+        except asyncio.TimeoutError:
+            return jsonify({"error": "Telegram client startup timed out."}), 503
+        except Exception as e:
+            return jsonify({"error": f"Telegram client startup failed: {e}"}), 503
+
+    if connection_future.exception():
+        return jsonify({"error": f"Telegram client failed to connect: {connection_future.exception()}"}), 503
 
     data = request.json
     keyword = data.get('keyword')
@@ -83,6 +93,7 @@ async def search_entities():
 
     results = []
     try:
+        # All client calls are now directly awaited as they rely on the already-connected client
         async for dialog in client.iter_dialogs():
             entity = dialog.entity
             title = getattr(entity, 'title', entity.first_name)
@@ -146,8 +157,16 @@ async def search_entities():
 
 @app.route('/get_messages', methods=['POST'])
 async def get_messages():
-    if not TELETHON_CLIENT_CONNECTED:
-        return jsonify({"error": "Telegram client not initialized or connected."}), 503
+    if not connection_future.done():
+        try:
+            await asyncio.wait_for(connection_future, timeout=30)
+        except asyncio.TimeoutError:
+            return jsonify({"error": "Telegram client startup timed out."}), 503
+        except Exception as e:
+            return jsonify({"error": f"Telegram client startup failed: {e}"}), 503
+
+    if connection_future.exception():
+        return jsonify({"error": f"Telegram client failed to connect: {connection_future.exception()}"}), 503
 
     data = request.json
     entity_identifier = data.get('entity_id') or data.get('entity_username')
@@ -199,8 +218,16 @@ async def get_messages():
 
 @app.route('/get_members', methods=['POST'])
 async def get_members():
-    if not TELETHON_CLIENT_CONNECTED:
-        return jsonify({"error": "Telegram client not initialized or connected."}), 503
+    if not connection_future.done():
+        try:
+            await asyncio.wait_for(connection_future, timeout=30)
+        except asyncio.TimeoutError:
+            return jsonify({"error": "Telegram client startup timed out."}), 503
+        except Exception as e:
+            return jsonify({"error": f"Telegram client startup failed: {e}"}), 503
+
+    if connection_future.exception():
+        return jsonify({"error": f"Telegram client failed to connect: {connection_future.exception()}"}), 503
 
     data = request.json
     entity_identifier = data.get('entity_id') or data.get('entity_username')
