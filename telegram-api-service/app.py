@@ -35,7 +35,7 @@ except RuntimeError:
 # Create a future to hold the connection status/client object
 connection_future = asyncio.Future(loop=loop)
 
-async def _connect_telethon_on_startup():
+async def startup_telethon_client():
     print("Attempting to connect Telethon client directly on module load...")
     try:
         # Client.start() handles connection and authorization/session loading
@@ -48,15 +48,15 @@ async def _connect_telethon_on_startup():
             if not client.is_connected():
                 await client.connect()
         print("Telethon client connection established for application lifetime.")
-        connection_future.set_result(client) # Indicate success
+        connection_future.set_result(True) # Indicate success
     except Exception as e:
         print(f"CRITICAL ERROR: Failed to connect Telethon client on startup: {e}")
-        connection_future.set_exception(e) # Indicate failure
+        connection_future.set_result(False) # Indicate failure
         raise # Re-raise to crash early if connection is critical
 
 # Schedule the connection task to run on the event loop
 # This makes it run once when the module loads, managed by Hypercorn's event loop.
-asyncio.create_task(_connect_telethon_on_startup())
+asyncio.create_task(startup_telethon_client())
 
 # --- API Endpoints ---
 
