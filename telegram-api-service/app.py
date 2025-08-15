@@ -18,71 +18,73 @@ if not all([API_ID, API_HASH, PHONE_NUMBER]):
 app = Flask(__name__)
 client = TelegramClient('anon_session', int(API_ID), API_HASH)
 
-# --- DIRECT TELETHON CLIENT INITIALIZATION AT MODULE LOAD ---
-# This approach leverages the fact that Hypercorn will manage an event loop
-# when the module is first loaded, allowing Telethon to connect once.
-# The 'anon_session.session' file MUST be present for this to work without interaction.
-try:
-    # Run the client connection in a separate thread's event loop
-    # or ensure it's awaited if Hypercorn provides a context.
-    # For Hypercorn, this generally works because it establishes the loop on startup.
-    loop = asyncio.get_event_loop() # Get Hypercorn's event loop
-except RuntimeError:
-    # If no loop is running (e.g., in a non-Hypercorn test environment, though not for Render)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+# --- Telethon Client Connection Management ---
+# A Future to track the client's connection status and hold the client itself (or an exception)
+_telethon_client_startup_future = asyncio.Future()
 
-# Create a future to hold the connection status/client object
-connection_future = asyncio.Future(loop=loop)
-
-async def startup_telethon_client():
-    print("Attempting to connect Telethon client directly on module load...")
+async def _connect_telethon_on_startup_task():
+    """Internal task to handle the actual Telethon connection and authorization."""
+    print("Attempting Telethon client connection and authorization...")
     try:
-        # Client.start() handles connection and authorization/session loading
         if not await client.is_user_authorized():
-            print("Telethon client not authorized, attempting session start (should use session file)...")
-            await client.start(phone=PHONE_NUMBER)
+            print(f"Telethon client not authorized, attempting session start for {PHONE_NUMBER}...")
+            await client.start(phone=PHONE_NUMBER) # This loads session or authenticates
             print("Telethon client authorized successfully.")
         else:
             print("Telethon client already authorized. Ensuring connection is active...")
             if not client.is_connected():
-                await client.connect()
-        print("Telethon client connection established for application lifetime.")
-        connection_future.set_result(True) # Indicate success
+                await client.connect() # Ensure connection if it's currently disconnected
+            print("Telethon client connection established for application lifetime.")
+        _telethon_client_startup_future.set_result(client) # Store the connected client upon success
     except Exception as e:
-        print(f"CRITICAL ERROR: Failed to connect Telethon client on startup: {e}")
-        connection_future.set_result(False) # Indicate failure
-        raise # Re-raise to crash early if connection is critical
+        print(f"CRITICAL ERROR: Failed to connect Telethon client: {e}")
+        _telethon_client_startup_future.set_exception(e) # Store the exception upon failure
 
-# Schedule the connection task to run on the event loop
-# This makes it run once when the module loads, managed by Hypercorn's event loop.
-asyncio.create_task(startup_telethon_client())
+# A global variable to hold the background startup task reference
+_startup_task = None
+
+async def ensure_telethon_client_ready():
+    """
+    Ensures the Telethon client startup task is initiated and awaited.
+    This function should be called at the beginning of each async API route.
+    """
+    global _startup_task
+    
+    # If the startup process hasn't completed yet
+    if not _telethon_client_startup_future.done():
+        if _startup_task is None:
+            # Only create the task once. The first request that hits this will initiate it.
+            _startup_task = asyncio.create_task(_connect_telethon_on_startup_task())
+            print("Scheduled Telethon client startup as a background task via first request.")
+        
+        # Wait for the startup task to complete.
+        # This will wait for the _startup_task if it's still running,
+        # or immediately return if it's already completed.
+        try:
+            await asyncio.wait_for(_startup_task, timeout=90) # Increased timeout to 90 seconds for client startup
+        except asyncio.TimeoutError:
+            print("Telethon client startup task timed out waiting.")
+            raise RuntimeError("Telegram client startup timed out.")
+    
+    # After waiting, check if the future holds an exception from the startup attempt
+    if _telethon_client_startup_future.exception():
+        raise _telethon_client_startup_future.exception() # Re-raise the original exception
 
 # --- API Endpoints ---
-
 @app.route('/')
-def home():
-    # Check if the connection attempt completed successfully
-    if connection_future.done() and not connection_future.exception():
+async def home(): # Make home route async too to use ensure_telethon_client_ready
+    try:
+        await ensure_telethon_client_ready()
         return "Telegram Scraper API is running and Telethon client is connected!"
-    else:
-        # If connection failed at startup, report 503
-        return "Telegram Scraper API is running, but Telethon client failed to connect at startup.", 503
+    except Exception as e:
+        return f"Telegram Scraper API is running, but Telethon client is not connected: {e}", 503
 
 @app.route('/search_entities', methods=['POST'])
 async def search_entities():
-    # Wait for the client to be connected on the first request if it hasn't finished yet
-    # This acts as a safeguard during potential race conditions at startup
-    if not connection_future.done():
-        try:
-            await asyncio.wait_for(connection_future, timeout=30) # Wait up to 30 seconds for connection
-        except asyncio.TimeoutError:
-            return jsonify({"error": "Telegram client startup timed out."}), 503
-        except Exception as e:
-            return jsonify({"error": f"Telegram client startup failed: {e}"}), 503
-
-    if connection_future.exception():
-        return jsonify({"error": f"Telegram client failed to connect: {connection_future.exception()}"}), 503
+    try:
+        await ensure_telethon_client_ready()
+    except Exception as e:
+        return jsonify({"error": f"Telegram client not ready: {e}"}), 503
 
     data = request.json
     keyword = data.get('keyword')
@@ -94,6 +96,7 @@ async def search_entities():
     results = []
     try:
         # All client calls are now directly awaited as they rely on the already-connected client
+        # client = _telethon_client_startup_future.result() # You can get the client from the future, but global 'client' is the same instance
         async for dialog in client.iter_dialogs():
             entity = dialog.entity
             title = getattr(entity, 'title', entity.first_name)
@@ -123,6 +126,7 @@ async def search_entities():
                 if len(results) >= limit:
                     break
         
+        # Direct lookup for exact matches (e.g., @username or ID) if not found in dialogs
         if (keyword.startswith('@') or keyword.isdigit()) and not any(r['username'] == keyword or str(r['id']) == keyword for r in results):
             try:
                 resolved_entity = await client.get_entity(keyword)
@@ -137,7 +141,6 @@ async def search_entities():
                     entity_type = "channel"
                 else:
                     entity_type = "unknown"
-                
                 results.append({
                     "id": resolved_entity.id,
                     "title": getattr(resolved_entity, 'title', resolved_entity.first_name),
@@ -155,18 +158,13 @@ async def search_entities():
 
     return jsonify(results)
 
+
 @app.route('/get_messages', methods=['POST'])
 async def get_messages():
-    if not connection_future.done():
-        try:
-            await asyncio.wait_for(connection_future, timeout=30)
-        except asyncio.TimeoutError:
-            return jsonify({"error": "Telegram client startup timed out."}), 503
-        except Exception as e:
-            return jsonify({"error": f"Telegram client startup failed: {e}"}), 503
-
-    if connection_future.exception():
-        return jsonify({"error": f"Telegram client failed to connect: {connection_future.exception()}"}), 503
+    try:
+        await ensure_telethon_client_ready()
+    except Exception as e:
+        return jsonify({"error": f"Telegram client not ready: {e}"}), 503
 
     data = request.json
     entity_identifier = data.get('entity_id') or data.get('entity_username')
@@ -194,8 +192,8 @@ async def get_messages():
                 sender_name = getattr(message.sender, 'first_name', '')
                 if getattr(message.sender, 'last_name', ''):
                     sender_name += ' ' + getattr(message.sender, 'last_name', '')
-                if not sender_name:
-                    sender_name = getattr(entity, 'title', 'Channel/Group')
+                if not sender_name: # Fallback if no first/last name
+                    sender_name = getattr(entity, 'title', 'Channel/Group') # Use entity title if sender name empty
                 sender_id = getattr(message.sender, 'id', None)
 
             messages_data.append({
@@ -209,25 +207,19 @@ async def get_messages():
                 "replies": message.replies.replies if message.replies else 0,
                 "link": message.url,
             })
-
     except Exception as e:
         print(f"Error in get_messages: {e}")
         return jsonify({"error": str(e)}), 500
 
     return jsonify(messages_data)
 
+
 @app.route('/get_members', methods=['POST'])
 async def get_members():
-    if not connection_future.done():
-        try:
-            await asyncio.wait_for(connection_future, timeout=30)
-        except asyncio.TimeoutError:
-            return jsonify({"error": "Telegram client startup timed out."}), 503
-        except Exception as e:
-            return jsonify({"error": f"Telegram client startup failed: {e}"}), 503
-
-    if connection_future.exception():
-        return jsonify({"error": f"Telegram client failed to connect: {connection_future.exception()}"}), 503
+    try:
+        await ensure_telethon_client_ready()
+    except Exception as e:
+        return jsonify({"error": f"Telegram client not ready: {e}"}), 503
 
     data = request.json
     entity_identifier = data.get('entity_id') or data.get('entity_username')
@@ -246,7 +238,8 @@ async def get_members():
 
         if not entity:
             return jsonify({"error": "Entity not found or could not be resolved"}), 404
-
+        
+        # Only fetch members from groups/channels
         if isinstance(entity, (Channel, Chat)) and (entity.megagroup or entity.gigagroup):
             async for participant in client.iter_participants(entity, limit=limit):
                 members_data.append({
@@ -274,5 +267,5 @@ async def get_members():
 #     except RuntimeError:
 #         loop = asyncio.new_event_loop()
 #         asyncio.set_event_loop(loop)
-#     loop.run_until_complete(startup_telethon_client())
+#     # We don't call client.start() here because Hypercorn handles the event loop.
 #     app.run(debug=True, port=8080, host='0.0.0.0') # For local testing, not for Render
