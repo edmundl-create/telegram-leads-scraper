@@ -22,31 +22,42 @@ if not all([API_ID, API_HASH, TELETHON_STRING_SESSION]):
 app = Flask(__name__)
 
 # Global client and connection management variables
-# client will be initialized/re-initialized as needed
-client = None # Start with client as None
-_telethon_client_startup_future = asyncio.Future() # Tracks if ANY client startup has succeeded
-_startup_task = None # To hold the reference to the initial background task
+client = None # Start with client as None, will be initialized/re-initialized as needed
+_client_lock = asyncio.Lock() # Use a lock to prevent multiple concurrent re-initializations
 
 async def initialize_and_connect_telethon_client():
     """
     Initializes a new TelethonClient and attempts to connect it.
-    This function creates a *new* client instance each time it's called.
+    This function creates a *new* client instance each time it's called
+    and explicitly binds it to the current running event loop.
     """
     global client
     print("LOG: initialize_and_connect_telethon_client: Creating new TelethonClient instance.", flush=True)
     try:
-        # Create a brand new client instance for this connection attempt
-        client = TelegramClient(StringSession(TELETHON_STRING_SESSION), int(API_ID), API_HASH)
+        # Get the current running event loop provided by Hypercorn
+        current_loop = asyncio.get_running_loop() 
+        print(f"LOG: initialize_and_connect_telethon_client: Using event loop: {current_loop}", flush=True)
         
-        print("LOG: initialize_and_connect_telethon_client: Attempting client.start() with StringSession...", flush=True)
-        await client.start() # This handles connection and authorization with StringSession
-        print("LOG: initialize_and_connect_telethon_client: client.start() completed.", flush=True)
+        # Initialize client with StringSession AND explicitly pass the current event loop
+        # This is CRUCIAL for stability with Flask/Hypercorn
+        new_client = TelegramClient(
+            StringSession(TELETHON_STRING_SESSION),
+            int(API_ID),
+            API_HASH,
+            loop=current_loop # Explicitly bind to the current loop
+        )
         
-        if await client.is_user_authorized():
+        print("LOG: initialize_and_connect_telethon_client: Attempting new_client.start() with StringSession...", flush=True)
+        await new_client.start() # This handles connection and authorization
+        print("LOG: initialize_and_connect_telethon_client: new_client.start() completed.", flush=True)
+        
+        if await new_client.is_user_authorized():
             print("LOG: initialize_and_connect_telethon_client: Telethon client authorized and connected successfully.", flush=True)
+            client = new_client # Assign the newly connected client to the global variable
             return True # Success
         else:
             print("CRITICAL ERROR: initialize_and_connect_telethon_client: Telethon client connected but not authorized unexpectedly.", flush=True)
+            await new_client.disconnect() # Disconnect the failed client
             return False # Failed authorization
             
     except Exception as e:
@@ -54,6 +65,9 @@ async def initialize_and_connect_telethon_client():
         print("CRITICAL ERROR: Printing full traceback for connection failure:", flush=True)
         traceback.print_exc(file=sys.stdout)
         sys.stdout.flush()
+        # Ensure any partially connected client is disconnected
+        if 'new_client' in locals() and new_client.is_connected():
+            await new_client.disconnect()
         return False # Failed to connect
 
 
@@ -62,53 +76,30 @@ async def ensure_telethon_client_ready():
     Ensures the Telethon client is connected and ready.
     This function is called by each API endpoint. It now handles:
     1. Initial global client setup.
-    2. Re-connecting/re-initializing the client if it becomes disconnected.
+    2. Re-connecting/re-initializing the client if it becomes disconnected or unauthorized.
     """
-    global client, _startup_task
+    global client
 
-    # Step 1: Handle initial client setup if it hasn't happened yet
-    if client is None:
-        print("LOG: ensure_telethon_client_ready: Client is None. Initiating first-time connection.", flush=True)
-        _startup_task = asyncio.create_task(initialize_and_connect_telethon_client())
-        _telethon_client_startup_future.set_result(None) # Mark future as started, actual result set by task
-        print("LOG: ensure_telethon_client_ready: Initial client connection scheduled as background task.", flush=True)
-        
-        try:
-            # Wait for the initial connection task to complete.
-            success = await asyncio.wait_for(_startup_task, timeout=120) 
-            if not success:
-                print("CRITICAL ERROR: ensure_telethon_client_ready: Initial client connection failed (task returned False).", flush=True)
-                raise RuntimeError("Initial Telegram client connection failed.")
-            print("LOG: ensure_telethon_client_ready: Initial client connection task completed successfully.", flush=True)
-        except asyncio.TimeoutError:
-            print("CRITICAL ERROR: ensure_telethon_client_ready: Initial Telegram client connection timed out.", flush=True)
-            raise RuntimeError("Initial Telegram client connection timed out.")
-        except Exception as e:
-            print(f"CRITICAL ERROR: ensure_telethon_client_ready: Unexpected error during initial client connection: {e}", flush=True)
-            raise RuntimeError(f"Unexpected error during initial client connection: {e}")
-
-    # Step 2: For subsequent requests (or if initial client setup needs re-checking):
-    # Check if the client is connected and authorized. If not, re-initialize and connect.
-    try:
-        # Check if the client is not connected OR if it exists but is not authorized
+    async with _client_lock: # Ensure only one re-initialization happens at a time
+        # Check if the client exists, is connected, and is authorized
+        # This triple check is robust
         if not (client and client.is_connected() and await client.is_user_authorized()):
-            print("LOG: ensure_telethon_client_ready: Client either not connected or not authorized. Attempting re-initialization and reconnection...", flush=True)
+            print("LOG: ensure_telethon_client_ready: Client either not initialized, not connected, or not authorized. Attempting to (re-)initialize and connect...", flush=True)
+            
+            # If an old client exists and is connected, disconnect it cleanly first
+            if client and client.is_connected():
+                print("LOG: ensure_telethon_client_ready: Disconnecting old client before re-initialization.", flush=True)
+                await client.disconnect()
+                client = None # Clear global client reference
+
             success = await initialize_and_connect_telethon_client() # Recreate and reconnect
             if not success:
-                print("CRITICAL ERROR: ensure_telethon_client_ready: Re-connection/re-initialization failed.", flush=True)
-                raise RuntimeError("Telegram client failed to reconnect/re-initialize.")
-            print("LOG: ensure_telethon_client_ready: Client re-initialized and reconnected successfully.", flush=True)
-        
-    except Exception as e:
-        print(f"CRITICAL ERROR: ensure_telethon_client_ready: Failed to ensure client is connected/authorized for request: {e}", flush=True)
-        traceback.print_exc(file=sys.stdout) # Print full traceback
-        sys.stdout.flush()
-        # Ensure the future is marked as failed so subsequent calls fail fast
-        if not _telethon_client_startup_future.done():
-            _telethon_client_startup_future.set_exception(e)
-        raise RuntimeError(f"Telegram client failed to reconnect or verify authorization: {e}")
+                print("CRITICAL ERROR: ensure_telethon_client_ready: (Re-)connection/re-initialization failed.", flush=True)
+                raise RuntimeError("Telegram client failed to connect or re-initialize.")
+            print("LOG: ensure_telethon_client_ready: Client (re-)initialized and connected successfully.", flush=True)
+        else:
+            print("LOG: ensure_telethon_client_ready: Client already connected and authorized.", flush=True)
 
-    # If we reached here, the client should be ready
     print("LOG: Telethon client confirmed ready for request.", flush=True)
 
 
@@ -121,6 +112,9 @@ async def home():
         return "Telegram Scraper API is running and Telethon client is connected!"
     except Exception as e:
         print(f"LOG: Error at / endpoint: {e}", flush=True)
+        # Attempt to get the actual exception message if it's from the future
+        if isinstance(e, RuntimeError) and "timed out" in str(e) and _telethon_client_startup_future.done() and _telethon_client_startup_future.exception():
+            e = _telethon_client_startup_future.exception()
         return f"Telegram Scraper API is running, but Telethon client is not connected: {e}", 503
 
 @app.route('/search_entities', methods=['POST'])
@@ -142,6 +136,7 @@ async def search_entities():
 
     results = []
     try:
+        # Use the global client object now that it's confirmed ready
         async for dialog in client.iter_dialogs():
             entity = dialog.entity
             title = getattr(entity, 'title', entity.first_name)
@@ -198,6 +193,8 @@ async def search_entities():
 
     except Exception as e:
         print(f"ERROR: Error in search_entities: {e}", flush=True)
+        traceback.print_exc(file=sys.stdout) # Print full traceback
+        sys.stdout.flush()
         return jsonify({"error": str(e)}), 500
 
     return jsonify(results)
@@ -256,6 +253,8 @@ async def get_messages():
             })
     except Exception as e:
         print(f"ERROR: Error in get_messages: {e}", flush=True)
+        traceback.print_exc(file=sys.stdout) # Print full traceback
+        sys.stdout.flush()
         return jsonify({"error": str(e)}), 500
 
     return jsonify(messages_data)
@@ -305,6 +304,8 @@ async def get_members():
 
     except Exception as e:
         print(f"ERROR: Error in get_members: {e}", flush=True)
+        traceback.print_exc(file=sys.stdout) # Print full traceback
+        sys.stdout.flush()
         return jsonify({"error": str(e)}), 500
 
     return jsonify(members_data)
