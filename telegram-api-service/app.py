@@ -17,28 +17,63 @@ if not all([API_ID, API_HASH, PHONE_NUMBER]):
 app = Flask(__name__)
 client = TelegramClient('anon_session', int(API_ID), API_HASH)
 
-async def ensure_telethon_connection():
-    if not client.is_connected():
-        print("Telethon client not connected, attempting to connect...")
-        await client.connect()
-        print("Telethon client reconnected.")
+# --- GLOBAL FLAG FOR CONNECTION STATUS ---
+TELETHON_CLIENT_CONNECTED = False
 
-    if not await client.is_user_authorized():
-        print(f"Telethon client not authorized. Attempting to start session for {PHONE_NUMBER}...")
-        try:
-            await client.start(phone=PHONE_NUMBER)
-            print("Telethon client authorized successfully.")
-        except Exception as e:
-            print(f"Error during Telethon client authorization: {e}")
-            raise
+# --- Telegram Client Connection and Authentication Utility ---
+# This function will now be called only ONCE during application startup
+async def startup_telethon_client():
+    global TELETHON_CLIENT_CONNECTED
+    print("Attempting to connect Telethon client during application startup...")
+    try:
+        # We only call client.start() once here. Telethon manages reconnections internally.
+        if not await client.is_user_authorized():
+            print(f"Telethon client not authorized, attempting session start for {PHONE_NUMBER}...")
+            await client.start(phone=PHONE_NUMBER) # This loads session or authenticates
+            print("Telethon client authorized successfully during startup.")
+        else:
+            print("Telethon client already authorized. Ensuring connection is active...")
+            # Ensure client is connected if not already (e.g. after sleep)
+            if not client.is_connected():
+                await client.connect()
+            
+        print("Telethon client connection established for application lifetime.")
+        TELETHON_CLIENT_CONNECTED = True
+    except Exception as e:
+        print(f"CRITICAL ERROR: Failed to connect Telethon client during startup: {e}")
+        # If client cannot connect at startup, future requests will fail.
+        # Consider more robust error handling or shutdown.
+        TELETHON_CLIENT_CONNECTED = False # Ensure flag is false on failure
+        raise # Re-raise to fail early if connection critical
+
+# --- Application Startup Hook for Hypercorn ---
+# Hypercorn has its own startup/shutdown hooks
+# We'll leverage a simple async task that runs at app start
+# Flask has no simple @app.before_first_request for async functions
+# So we run it as a background task.
+@app.before_serving
+async def setup_telethon_client_hook():
+    # This hook runs AFTER the server is ready, but BEFORE it serves requests.
+    # It might run in Hypercorn's event loop, so we run our client.start() as a task.
+    # We should only attempt this if the client isn't already connected globally.
+    if not TELETHON_CLIENT_CONNECTED:
+        asyncio.create_task(startup_telethon_client())
+        print("Telethon client startup task initiated.")
+
+# --- API Endpoints ---
 
 @app.route('/')
 def home():
-    return "Telegram Scraper API is running!"
+    if TELETHON_CLIENT_CONNECTED:
+        return "Telegram Scraper API is running and Telethon client is connected!"
+    else:
+        return "Telegram Scraper API is running, but Telethon client is not connected.", 503 # Service Unavailable
 
 @app.route('/search_entities', methods=['POST'])
 async def search_entities():
-    await ensure_telethon_connection()
+    if not TELETHON_CLIENT_CONNECTED:
+        return jsonify({"error": "Telegram client not initialized or connected."}), 503
+
     data = request.json
     keyword = data.get('keyword')
     limit = int(data.get('limit', 5))
@@ -111,7 +146,9 @@ async def search_entities():
 
 @app.route('/get_messages', methods=['POST'])
 async def get_messages():
-    await ensure_telethon_connection()
+    if not TELETHON_CLIENT_CONNECTED:
+        return jsonify({"error": "Telegram client not initialized or connected."}), 503
+
     data = request.json
     entity_identifier = data.get('entity_id') or data.get('entity_username')
     limit = int(data.get('limit', 10))
@@ -162,7 +199,9 @@ async def get_messages():
 
 @app.route('/get_members', methods=['POST'])
 async def get_members():
-    await ensure_telethon_connection()
+    if not TELETHON_CLIENT_CONNECTED:
+        return jsonify({"error": "Telegram client not initialized or connected."}), 503
+
     data = request.json
     entity_identifier = data.get('entity_id') or data.get('entity_username')
     limit = int(data.get('limit', 10))
@@ -200,22 +239,13 @@ async def get_members():
         return jsonify({"error": str(e)}), 500
 
     return jsonify(members_data)
-# For running locally (for initial session generation or debugging):
-# This part needs to be uncommented for local execution.
+
+# This part is commented out for Render deployment as Hypercorn manages the server.
 # if __name__ == '__main__':
-#     # Ensure the event loop is created for async Flask and run initial connection
 #     try:
 #         loop = asyncio.get_event_loop()
 #     except RuntimeError:
 #         loop = asyncio.new_event_loop()
 #         asyncio.set_event_loop(loop)
-#
-#     # Run the ensure_telethon_connection before starting the app
-#     # This is where the Telegram authentication prompt will appear
-#     loop.run_until_complete(ensure_telethon_connection())
-#
-#     # You can keep this line commented out for session generation,
-#     # or uncomment if you want to test the local Flask server after session.
-#     # If uncommented, you can access http://localhost:8080
-#     # app.run(debug=True, port=8080, host='0.0.0.0')
-#     print("Telethon session generated. Script will now exit unless app.run is uncommented.")
+#     loop.run_until_complete(startup_telethon_client())
+#     app.run(debug=True, port=8080, host='0.0.0.0') # For local testing, not for Render
