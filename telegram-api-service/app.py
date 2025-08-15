@@ -1,7 +1,10 @@
 import os
 import asyncio
+import sys # Import sys for stdout flushing
+import traceback # Import traceback for printing exceptions
 from flask import Flask, request, jsonify
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession # Import StringSession
 from telethon.tl.types import Channel, Chat, User
 from dotenv import load_dotenv
 
@@ -10,53 +13,55 @@ load_dotenv()
 # --- Configuration ---
 API_ID = os.getenv('TELEGRAM_API_ID')
 API_HASH = os.getenv('TELEGRAM_API_HASH')
-PHONE_NUMBER = os.getenv('TELEGRAM_PHONE_NUMBER')
+# PHONE_NUMBER is no longer directly used in app.py for authentication
+TELETHON_STRING_SESSION = os.getenv('TELETHON_STRING_SESSION') # New env var
 
-if not all([API_ID, API_HASH, PHONE_NUMBER]):
-    raise ValueError("Missing one or more Telegram API credentials. Ensure TELEGRAM_API_ID, TELEGRAM_API_HASH, and TELEGRAM_PHONE_NUMBER are set.")
+# Basic validation
+if not all([API_ID, API_HASH, TELETHON_STRING_SESSION]):
+    raise ValueError("Missing one or more Telegram API credentials. Ensure TELEGRAM_API_ID, TELEGRAM_API_HASH, and TELETHON_STRING_SESSION are set.")
 
 app = Flask(__name__)
-client = TelegramClient('anon_session', int(API_ID), API_HASH)
+# Initialize client with StringSession
+client = TelegramClient(StringSession(TELETHON_STRING_SESSION), int(API_ID), API_HASH)
 
 # --- Telethon Client Connection Management ---
 _telethon_client_startup_future = asyncio.Future()
 _startup_task = None # To hold the reference to the background task
 
 async def _connect_telethon_on_startup_task():
-    """Internal task to handle the actual Telethon connection and authorization."""
+    """
+    Internal task to handle the actual Telethon connection.
+    This version relies on client.start() to handle both connection and authorization.
+    """
     print("LOG: _connect_telethon_on_startup_task initiated.", flush=True)
     try:
-        # Give a tiny moment for the world to settle, especially on Render free tier
-        await asyncio.sleep(1) 
-        print("LOG: After initial sleep. Checking authorization.", flush=True)
+        await asyncio.sleep(1) # Small delay for environment to settle
+        print("LOG: After initial sleep. Attempting client.start() with StringSession...", flush=True)
 
-        # Check if client is already authorized (session file exists and is valid)
-        if not await client.is_user_authorized():
-            print(f"LOG: Telethon client not authorized, attempting session start for {PHONE_NUMBER}...", flush=True)
-            # This is where the session file is used or auth flow is initiated
-            await client.start(phone=PHONE_NUMBER)
-            print("LOG: Telethon client authorized successfully.", flush=True)
+        # With StringSession provided at initialization, client.start() will connect
+        # and ensure authorization without needing phone number or code input.
+        await client.start() 
+        
+        print("LOG: Telethon client.start() completed.", flush=True)
+
+        # Final check if user is authorized (should be true if StringSession is valid)
+        if await client.is_user_authorized(): 
+            print("LOG: Telethon client authorized and connected successfully for application lifetime.", flush=True)
         else:
-            print("LOG: Telethon client already authorized. Ensuring connection is active...", flush=True)
-            # If authorized, ensure it's connected (e.g., after Render sleep)
-            if not client.is_connected():
-                print("LOG: Client detected as disconnected, attempting to reconnect...", flush=True)
-                await client.connect()
-                print("LOG: Client reconnected.", flush=True)
-            else:
-                print("LOG: Client already connected.", flush=True)
+            # This case should ideally not be hit with a valid StringSession and successful client.start()
+            print("CRITICAL ERROR: Telethon client connected but not authorized after client.start() with StringSession.", flush=True)
+            raise RuntimeError("Client connected but not authorized after StringSession startup.")
 
         _telethon_client_startup_future.set_result(client)
         print("LOG: _telethon_client_startup_future set to success.", flush=True)
     except Exception as e:
-        print(f"CRITICAL ERROR: Failed to connect Telethon client: {e}", flush=True)
-        # print the full traceback for more info
-        import traceback
+        print(f"CRITICAL ERROR: Failed to connect Telethon client using StringSession: {e}", flush=True)
+        print("CRITICAL ERROR: Printing full traceback:", flush=True)
         traceback.print_exc(file=sys.stdout) # Print to stdout so Render captures it
+        sys.stdout.flush() # Explicitly flush stdout buffer
         _telethon_client_startup_future.set_exception(e)
         print("LOG: _telethon_client_startup_future set to exception.", flush=True)
-        # Re-raise to ensure the task fails and can be seen if awaited
-        raise
+        raise # Re-raise to ensure the task fails and can be seen if awaited
 
 async def ensure_telethon_client_ready():
     """
@@ -76,14 +81,12 @@ async def ensure_telethon_client_ready():
             print("LOG: _startup_task already exists, awaiting its completion.", flush=True)
         
         try:
-            # We wait for the task itself, which will either complete or raise its exception
             await asyncio.wait_for(_startup_task, timeout=120) # Increased timeout to 120 seconds
             print("LOG: _startup_task completed successfully (or was already done).", flush=True)
         except asyncio.TimeoutError:
             print("CRITICAL ERROR: Telethon client startup task timed out waiting.", flush=True)
             raise RuntimeError("Telegram client startup timed out.")
         except Exception as e:
-            # Catch exceptions from the task itself, re-raise if it's the actual startup exception
             if _telethon_client_startup_future.exception():
                 print("LOG: _telethon_client_startup_future indicates an exception from task, re-raising.", flush=True)
                 raise _telethon_client_startup_future.exception()
@@ -97,8 +100,7 @@ async def ensure_telethon_client_ready():
     
     print("LOG: Telethon client confirmed ready.", flush=True)
 
-
-# --- API Endpoints ---
+# --- API Endpoints (These remain the same as previous version) ---
 @app.route('/')
 async def home():
     print("LOG: Received request to /", flush=True)
